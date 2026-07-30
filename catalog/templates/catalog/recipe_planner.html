@@ -1,0 +1,439 @@
+{% extends "catalog/app_base.html" %}
+
+{% block title %}Recipe Planner{% endblock %}
+
+{% block extra_style %}
+  .field-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .row { grid-template-columns: minmax(300px, 1.8fr) 110px 110px minmax(220px, 1fr); }
+  @media (max-width: 1080px) {
+    .field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .row { grid-template-columns: 1fr; }
+  }
+{% endblock %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-card">
+      <h1>Recipe Planner</h1>
+      <p>Save the ingredients you already have or plan to buy, choose a planning horizon, and generate recipes that use your saved profile for goals, metabolism, culture, diet, lifestyle, and budget.</p>
+    </div>
+    <aside class="stats">
+      <h2>Profile Snapshot</h2>
+      <div class="summary">
+        <strong>{{ profile.primary_goal.name|default:"Primary goal not set" }}</strong>
+        <p>Secondary: {{ profile.secondary_goal.name|default:"Not set" }}</p>
+      </div>
+      <div class="summary">
+        <strong>Body metrics</strong>
+        <p>
+          {% if metrics %}
+            BMI {{ metrics.bmi }}, BMR {{ metrics.bmr_kcal }} kcal, TDEE {{ metrics.tdee_kcal }} kcal
+          {% else %}
+            Add height and weight in your profile to unlock BMI, BMR, and TDEE-guided planning.
+          {% endif %}
+        </p>
+      </div>
+      <div class="summary">
+        <strong>Saved constraints</strong>
+        <p>Diet: {{ profile.get_diet_style_display|default:"Not set" }}<br>Lifestyle: {{ profile.get_lifestyle_display|default:"Not set" }}<br>Allergies: {{ profile.allergies|default:"None saved" }}</p>
+      </div>
+      <a class="button-link" href="/profile/">Edit profile</a>
+    </aside>
+  </section>
+
+  {% if warnings %}
+    <div class="card">
+      {% for warning in warnings %}
+        <p class="warning">{{ warning }}</p>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <form method="post" id="planner-form" enctype="multipart/form-data">
+    {% csrf_token %}
+
+    <div class="card">
+      <h2 class="section-title">Plan Settings</h2>
+      <div class="field-grid">
+        <div class="field">
+          <label for="horizon">Planning Horizon</label>
+          <select id="horizon" name="horizon">
+            {% for value, label in horizon_choices %}
+              <option value="{{ value }}"{% if plan.horizon == value %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <small>Optimize for tomorrow, the next few days, a week, or a month.</small>
+        </div>
+        <div class="field full">
+          <label for="plan_notes">Plan Notes</label>
+          <textarea id="plan_notes" name="plan_notes" placeholder="e.g. use what is already open first, keep lunch portable, dinner should be low effort">{{ plan.notes }}</textarea>
+          <small>These notes are about this ingredient plan, not your personal profile.</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Ingredient Image</h2>
+      <div class="field-grid" style="grid-template-columns: 1.2fr 1fr;">
+        <div class="field">
+          <label for="ingredient_image">Upload ingredient or grocery image</label>
+          <input id="ingredient_image" type="file" name="ingredient_image" accept="image/*">
+          <small>Use this when you want the planner to detect visible ingredients or packaged groceries from an image and merge matched items into your saved plan.</small>
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button type="submit" class="secondary" formaction="/recipe-planner/image/">Analyze Image</button>
+          <small>The vision analysis is saved in the DB. Matched items are merged into the current ingredient list; unmatched detections are shown below.</small>
+        </div>
+      </div>
+      {% if latest_image_analysis %}
+        <div style="margin-top: 18px; display: grid; gap: 18px; grid-template-columns: 220px 1fr;">
+          <div>
+            {% if latest_image_analysis.image %}
+              <img src="{{ latest_image_analysis.image.url }}" alt="Uploaded ingredients" style="width: 100%; border-radius: 14px; border: 1px solid var(--line); background: #f5efe2;">
+            {% endif %}
+          </div>
+          <div>
+            <div style="margin-bottom: 8px;">
+              <strong>Latest image analysis</strong>
+              <span class="pill">{{ latest_image_analysis.status }}</span>
+              {% if latest_image_analysis.model_name %}<span class="pill">{{ latest_image_analysis.model_name }}</span>{% endif %}
+            </div>
+            {% if latest_image_analysis.response_json.summary %}
+              <p class="muted" style="margin: 0 0 8px;">{{ latest_image_analysis.response_json.summary }}</p>
+            {% endif %}
+            {% if latest_image_analysis.extracted_items %}
+              <ul>
+                {% for item in latest_image_analysis.extracted_items %}
+                  <li>
+                    <strong>{{ item.name }}</strong>
+                    {% if item.estimated_quantity %} · {{ item.estimated_quantity }} {{ item.unit }}{% endif %}
+                    {% if item.confidence %} · {{ item.confidence }}{% endif %}
+                    {% if item.matched_product_name %} · matched to {{ item.matched_product_name }}{% else %} · no local match{% endif %}
+                    {% if item.notes %} · {{ item.notes }}{% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            {% elif latest_image_analysis.error_text %}
+              <p class="warning">{{ latest_image_analysis.error_text }}</p>
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2 class="section-title">Ingredient List</h2>
+      <div class="rows" id="rows">
+        {% if plan_items %}
+          {% for item in plan_items %}
+            <div class="row">
+              <div>
+                <input type="hidden" name="product_id" value="{{ item.product.id }}">
+                <input type="text" name="product_name" value="{{ item.product.name }}" autocomplete="off">
+                <div class="suggestions"></div>
+              </div>
+              <div>
+                <input type="number" step="0.01" min="0" name="quantity" value="{{ item.quantity }}">
+              </div>
+              <div>
+                <input type="text" name="unit" value="{{ item.unit }}" placeholder="unit">
+              </div>
+              <div>
+                <label><input type="checkbox" name="is_pantry_staple" value="{{ forloop.counter0 }}"{% if item.is_pantry_staple %} checked{% endif %}> Pantry staple / spice</label>
+                <input type="text" name="item_note" value="{{ item.notes }}" placeholder="Optional note">
+              </div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="row">
+            <div>
+              <input type="hidden" name="product_id">
+              <input type="text" name="product_name" placeholder="Search product" autocomplete="off">
+              <div class="suggestions"></div>
+            </div>
+            <div>
+              <input type="number" step="0.01" min="0" name="quantity" value="1">
+            </div>
+            <div>
+              <input type="text" name="unit" value="unit" placeholder="unit">
+            </div>
+            <div>
+              <label><input type="checkbox" name="is_pantry_staple" value="0"> Pantry staple / spice</label>
+              <input type="text" name="item_note" placeholder="Optional note">
+            </div>
+          </div>
+        {% endif %}
+      </div>
+      <div class="toolbar">
+        <button type="button" id="add-row" class="secondary">Add Ingredient</button>
+        <button type="submit" name="clear_ingredients" value="1" class="secondary">Clear Ingredient List</button>
+        <button type="button" id="stream-generate">Suggest Recipes</button>
+      </div>
+    </div>
+  </form>
+
+  <div class="card">
+    <h2 class="section-title">Estimated Metrics</h2>
+    {% if metrics %}
+      <div class="planner-grid" style="grid-template-columns: repeat(4, minmax(0, 1fr));">
+        <div class="summary"><strong>Height</strong><p>{{ metrics.height_cm }} cm</p></div>
+        <div class="summary"><strong>Weight</strong><p>{{ metrics.weight_kg }} kg</p></div>
+        <div class="summary"><strong>BMI</strong><p>{{ metrics.bmi }}</p></div>
+        <div class="summary"><strong>BMR / TDEE</strong><p>{{ metrics.bmr_kcal }} / {{ metrics.tdee_kcal }} kcal</p></div>
+      </div>
+    {% else %}
+      <p class="muted">Add height and weight to estimate BMI, BMR, and TDEE. These improve calorie-aware recipe planning.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">Current Ingredient List</h2>
+    <div class="planner-grid">
+      {% if plan_items %}
+        {% for item in plan_items %}
+          <div class="planner-item">
+            {% if item.product.image_url %}
+              <img src="{{ item.product.image_url }}" alt="{{ item.product.name }}" class="selected-thumb">
+            {% else %}
+              <div class="selected-thumb"></div>
+            {% endif %}
+            <div>
+              <strong>{{ item.product.name }}</strong>
+              <div class="muted">
+                {{ item.quantity }} {{ item.unit }} · {{ item.product.package_size }}
+                {% if item.is_pantry_staple %}<span class="pill">Pantry staple</span>{% endif %}
+                {% if item.notes %}<span class="pill">{{ item.notes }}</span>{% endif %}
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">No saved ingredients yet.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">Recipe Suggestions</h2>
+    <div id="stream-status" class="stream-status"></div>
+    <div id="result-block" class="result-block">
+      {% if latest_run and latest_run.status == "completed" %}
+        {{ latest_run.response_json|json_script:"initial-result-json" }}
+      {% endif %}
+      <div id="result-content"></div>
+    </div>
+    {% if latest_run and latest_run.status == "failed" %}
+      <p class="warning"><strong>Latest generation failed:</strong> {{ latest_run.error_text }}</p>
+    {% endif %}
+    {% if not latest_run %}
+      <p id="empty-result" class="muted">No recipe suggestions generated yet.</p>
+    {% else %}
+      <p id="empty-result" style="display:none;"></p>
+    {% endif %}
+  </div>
+
+  <template id="row-template">
+    <div class="row">
+      <div>
+        <input type="hidden" name="product_id">
+        <input type="text" name="product_name" placeholder="Search product" autocomplete="off">
+        <div class="suggestions"></div>
+      </div>
+      <div>
+        <input type="number" step="0.01" min="0" name="quantity" value="1">
+      </div>
+      <div>
+        <input type="text" name="unit" value="unit" placeholder="unit">
+      </div>
+      <div>
+        <label><input type="checkbox" name="is_pantry_staple"> Pantry staple / spice</label>
+        <input type="text" name="item_note" placeholder="Optional note">
+      </div>
+    </div>
+  </template>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script>
+    const rows = document.getElementById("rows");
+    const template = document.getElementById("row-template");
+    const addButton = document.getElementById("add-row");
+    const generateButton = document.getElementById("stream-generate");
+    const plannerForm = document.getElementById("planner-form");
+    const streamStatus = document.getElementById("stream-status");
+    const resultBlock = document.getElementById("result-block");
+    const resultContent = document.getElementById("result-content");
+    const emptyResult = document.getElementById("empty-result");
+    const initialResultNode = document.getElementById("initial-result-json");
+
+    function refreshPantryCheckboxIndexes() {
+      rows.querySelectorAll('.row').forEach((row, index) => {
+        const checkbox = row.querySelector('input[name="is_pantry_staple"]');
+        if (checkbox) checkbox.value = String(index);
+      });
+    }
+
+    function renderResults(data) {
+      if (!data) return;
+      emptyResult.style.display = "none";
+      resultBlock.style.display = "block";
+      const overview = data.overview || {};
+      const recipes = data.recipes || [];
+      const listHtml = (items, emptyText) => !items || !items.length ? `<ul><li>${emptyText}</li></ul>` : `<ul>${items.map(item => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`;
+      resultContent.innerHTML = `
+        <p><strong>Primary goal fit:</strong> ${escapeHtml(overview.primary_goal_fit || "-")}</p>
+        <p><strong>Secondary goal fit:</strong> ${escapeHtml(overview.secondary_goal_fit || "-")}</p>
+        ${data.metabolic_context ? `
+          <div class="summary" style="margin-top:12px;">
+            <p><strong>Metabolic context:</strong></p>
+            <ul>
+              <li><strong>BMI:</strong> ${escapeHtml(data.metabolic_context.bmi || "-")}</li>
+              <li><strong>BMR:</strong> ${escapeHtml(data.metabolic_context.bmr_kcal || "-")} kcal</li>
+              <li><strong>TDEE:</strong> ${escapeHtml(data.metabolic_context.tdee_kcal || "-")} kcal</li>
+              <li><strong>Planning note:</strong> ${escapeHtml(data.metabolic_context.planning_note || "-")}</li>
+            </ul>
+          </div>` : ""}
+        ${data.goal_explanation ? `<div class="summary" style="margin-top:12px;"><p><strong>Goal explanation:</strong></p><p>${escapeHtml(data.goal_explanation.summary || "-")}</p>${listHtml(data.goal_explanation.reasoning || [], "No extra reasoning provided.")}</div>` : ""}
+        ${data.daily_targets ? `<div class="summary" style="margin-top:12px;"><p><strong>Daily targets:</strong></p><ul><li><strong>Energy:</strong> ${escapeHtml(data.daily_targets.energy_kcal || "-")}</li><li><strong>Protein:</strong> ${escapeHtml(data.daily_targets.protein_g || "-")}</li><li><strong>Fat:</strong> ${escapeHtml(data.daily_targets.fat_g || "-")}</li><li><strong>Carbs:</strong> ${escapeHtml(data.daily_targets.carb_g || "-")}</li><li><strong>Fiber:</strong> ${escapeHtml(data.daily_targets.fiber_g || "-")}</li><li><strong>Sugar guidance:</strong> ${escapeHtml(data.daily_targets.sugar_guidance || "-")}</li><li><strong>Salt guidance:</strong> ${escapeHtml(data.daily_targets.salt_guidance || "-")}</li><li><strong>Meal distribution:</strong> ${escapeHtml(data.daily_targets.meal_distribution || "-")}</li></ul></div>` : ""}
+        ${recipes.map(recipe => `<div class="summary" style="margin-top:12px;"><h3 style="margin:0 0 6px;">${escapeHtml(recipe.title || "")}</h3><p class="muted" style="margin: 0 0 8px;">${escapeHtml(recipe.why_it_fits || "")}</p><p><strong>Servings:</strong> ${escapeHtml(recipe.servings || "-")}</p><p><strong>Estimated cost note:</strong> ${escapeHtml(recipe.estimated_cost_note || "-")}</p><p><strong>Uses ingredients:</strong></p>${listHtml(recipe.uses_ingredients || [], "None")}<p><strong>Missing items:</strong></p>${listHtml(recipe.missing_items || [], "None")}<p><strong>Cheaper bonus substitutes:</strong></p>${listHtml(recipe.cheaper_bonus_substitutes || [], "None suggested")}<p><strong>Steps:</strong></p>${listHtml(recipe.steps || [], "No steps provided")}</div>`).join("")}
+        <div class="summary" style="margin-top:12px;"><p><strong>Shopping gaps:</strong></p>${listHtml(data.shopping_gaps || [], "No extra items needed.")}<p><strong>Money-saving notes:</strong></p>${listHtml(data.money_saving_notes || [], "No extra savings notes.")}<p><strong>Nutrition notes:</strong></p>${listHtml(data.nutrition_notes || [], "No extra nutrition notes.")}<p><strong>Clarifying questions:</strong></p>${listHtml(data.questions_to_clarify || [], "No clarifications needed.")}</div>
+      `;
+    }
+
+    function escapeHtml(text) {
+      return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+    }
+
+    function wireRow(row) {
+      const textInput = row.querySelector('input[name="product_name"]');
+      const hiddenInput = row.querySelector('input[name="product_id"]');
+      const suggestions = row.querySelector(".suggestions");
+      let controller = null;
+
+      textInput.addEventListener("input", async () => {
+        hiddenInput.value = "";
+        const q = textInput.value.trim();
+        if (q.length < 2) {
+          suggestions.style.display = "none";
+          suggestions.innerHTML = "";
+          return;
+        }
+        if (controller) controller.abort();
+        controller = new AbortController();
+        const response = await fetch(`/api/products/search/?q=${encodeURIComponent(q)}&mode=planner`, { signal: controller.signal });
+        const data = await response.json();
+        suggestions.innerHTML = "";
+        for (const item of data.results) {
+          const option = document.createElement("div");
+          option.className = "suggestion";
+          const priceText = item.price_amount !== null ? ` · € ${Number(item.price_amount).toFixed(2)}` : "";
+          const bonusText = item.is_bonus ? " · bonus" : "";
+          option.innerHTML = `<div class="suggestion-item">${item.image_url ? `<img src="${item.image_url}" alt="" class="thumb">` : `<div class="thumb"></div>`}<div>${escapeHtml(item.name)}${item.brand ? " · " + escapeHtml(item.brand) : ""}${priceText}${bonusText}</div></div>`;
+          option.addEventListener("click", () => {
+            textInput.value = item.name;
+            hiddenInput.value = item.id;
+            suggestions.style.display = "none";
+            suggestions.innerHTML = "";
+          });
+          suggestions.appendChild(option);
+        }
+        suggestions.style.display = data.results.length ? "block" : "none";
+      });
+
+      document.addEventListener("click", (event) => {
+        if (!row.contains(event.target)) suggestions.style.display = "none";
+      });
+    }
+
+    async function streamRecipeGeneration() {
+      refreshPantryCheckboxIndexes();
+      const formData = new FormData(plannerForm);
+      streamStatus.textContent = "Starting recipe generation...";
+      generateButton.disabled = true;
+      resultBlock.style.display = "none";
+      emptyResult.style.display = "none";
+
+      const response = await fetch("/recipe-planner/stream/", {
+        method: "POST",
+        headers: { "X-CSRFToken": plannerForm.querySelector('input[name="csrfmiddlewaretoken"]').value },
+        body: formData,
+      });
+
+      if (!response.ok || !response.body) {
+        streamStatus.textContent = "Recipe generation failed to start.";
+        generateButton.disabled = false;
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundaryIndex;
+        while ((boundaryIndex = buffer.indexOf("\n\n")) !== -1) {
+          const eventBlock = buffer.slice(0, boundaryIndex);
+          buffer = buffer.slice(boundaryIndex + 2);
+          handleSseEvent(eventBlock);
+        }
+      }
+      generateButton.disabled = false;
+    }
+
+    function handleSseEvent(block) {
+      const lines = block.split("\n");
+      let eventName = "message";
+      let dataText = "";
+      for (const line of lines) {
+        if (line.startsWith("event:")) eventName = line.slice(6).trim();
+        if (line.startsWith("data:")) dataText += line.slice(5).trim();
+      }
+      if (!dataText) return;
+      const payload = JSON.parse(dataText);
+      if (eventName === "warning") {
+        streamStatus.textContent = payload.messages.join(" ");
+        return;
+      }
+      if (eventName === "status") {
+        streamStatus.textContent = payload.message;
+        return;
+      }
+      if (eventName === "chunk") {
+        streamStatus.textContent = "Streaming recipe response...";
+        return;
+      }
+      if (eventName === "complete") {
+        streamStatus.textContent = "Recipe generation completed.";
+        renderResults(payload.response_json);
+        return;
+      }
+      if (eventName === "error") {
+        streamStatus.textContent = payload.message;
+        generateButton.disabled = false;
+      }
+    }
+
+    addButton.addEventListener("click", () => {
+      const fragment = template.content.cloneNode(true);
+      rows.appendChild(fragment);
+      wireRow(rows.lastElementChild);
+      refreshPantryCheckboxIndexes();
+    });
+
+    generateButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      streamRecipeGeneration();
+    });
+
+    document.querySelectorAll(".row").forEach(wireRow);
+    refreshPantryCheckboxIndexes();
+
+    if (initialResultNode) {
+      try { renderResults(JSON.parse(initialResultNode.textContent)); } catch (error) { console.error("Could not parse initial recipe result JSON.", error); }
+    }
+  </script>
+{% endblock %}

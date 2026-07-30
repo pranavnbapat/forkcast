@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Supermarkt Planner{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f7f4ed;
+      --ink: #14263f;
+      --muted: #66768a;
+      --panel: rgba(255, 252, 246, 0.86);
+      --line: rgba(20, 38, 63, 0.12);
+      --accent: #0d6e76;
+      --accent-2: #d97706;
+      --accent-3: #134e4a;
+      --save: #166534;
+      --shadow: 0 28px 72px rgba(20, 38, 63, 0.10);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Manrope", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(255, 208, 122, 0.40), transparent 30%),
+        radial-gradient(circle at left center, rgba(80, 180, 172, 0.18), transparent 25%),
+        linear-gradient(180deg, #fffdfa 0%, #f3efe6 100%);
+    }
+    .page { max-width: 1360px; margin: 0 auto; padding: 28px 22px 80px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 26px;
+      flex-wrap: wrap;
+    }
+    .brand { font-family: "Fraunces", serif; font-size: 30px; text-decoration: none; color: var(--ink); }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; }
+    .nav a {
+      text-decoration: none;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.66);
+      padding: 10px 14px;
+      border-radius: 999px;
+      font-weight: 700;
+    }
+    .nav a.active {
+      background: linear-gradient(135deg, rgba(13, 110, 118, 0.18), rgba(217, 119, 6, 0.12));
+      border-color: rgba(13, 110, 118, 0.28);
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 18px;
+      margin-bottom: 22px;
+    }
+    .hero-card, .stats, .panel, .card {
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.55);
+      backdrop-filter: blur(16px);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+    }
+    .hero-card {
+      padding: 34px;
+      background:
+        radial-gradient(circle at top right, rgba(244, 201, 93, 0.34), transparent 28%),
+        linear-gradient(135deg, rgba(255,255,255,0.90), rgba(245,249,253,0.78));
+    }
+    .hero-card h1 {
+      margin: 0 0 12px;
+      font-family: "Fraunces", serif;
+      font-size: clamp(36px, 5vw, 58px);
+      line-height: 0.96;
+      letter-spacing: -0.04em;
+    }
+    .hero-card p, p.lead {
+      margin: 0;
+      max-width: 52rem;
+      color: var(--muted);
+      line-height: 1.7;
+      font-size: 16px;
+    }
+    .stats, .card, .panel { padding: 26px; }
+    .stats h2, .panel h2, .section-title, .card h2 {
+      margin: 0 0 14px;
+      font-family: "Fraunces", serif;
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    .metric-grid, .planner-grid { display: grid; gap: 12px; }
+    .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .metric {
+      padding: 16px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.72);
+    }
+    .metric strong { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 8px; }
+    .metric span { font-size: 24px; font-weight: 800; color: var(--accent-3); }
+    .layout, .split { display: grid; gap: 18px; }
+    .layout { grid-template-columns: 1.1fr 0.9fr; }
+    .split { grid-template-columns: 1.15fr 0.85fr; }
+    .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .field { display: grid; gap: 8px; }
+    .field.full { grid-column: 1 / -1; }
+    label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      font-weight: 800;
+    }
+    input, select, textarea, button {
+      font: inherit;
+    }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px 16px;
+      color: var(--ink);
+      background: rgba(255,255,255,0.88);
+    }
+    textarea { min-height: 112px; resize: vertical; }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: rgba(13, 110, 118, 0.55);
+      box-shadow: 0 0 0 4px rgba(13, 110, 118, 0.11);
+    }
+    .help, small, .muted { color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .rows { display: grid; gap: 14px; }
+    .row { position: relative; display: grid; gap: 12px; align-items: start; }
+    .toolbar, .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
+    button, .button-link {
+      border: 0;
+      border-radius: 18px;
+      padding: 14px 18px;
+      font: inherit;
+      font-weight: 800;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    button, .button-link.primary {
+      color: white;
+      background: linear-gradient(135deg, var(--accent), #0b566c);
+      box-shadow: 0 18px 34px rgba(13, 110, 118, 0.23);
+    }
+    button.secondary, .button-link.secondary {
+      color: white;
+      background: linear-gradient(135deg, var(--accent-2), #b45309);
+      box-shadow: 0 16px 30px rgba(217, 119, 6, 0.22);
+    }
+    .summary {
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.66);
+    }
+    .summary strong { display: block; margin-bottom: 8px; }
+    .summary p { margin: 0; color: var(--muted); line-height: 1.6; }
+    .suggestions {
+      position: static;
+      margin-top: 8px;
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow: hidden;
+      display: none;
+      box-shadow: var(--shadow);
+    }
+    .suggestion { padding: 12px 14px; border-bottom: 1px solid rgba(20, 38, 63, 0.08); cursor: pointer; background: #fff; }
+    .suggestion:last-child { border-bottom: 0; }
+    .suggestion:hover { background: #f2fbf7; }
+    .suggestion-item { display: grid; grid-template-columns: 44px 1fr; gap: 10px; align-items: center; }
+    .thumb, .selected-thumb {
+      object-fit: cover;
+      background: #edf4ec;
+      border: 1px solid rgba(20, 38, 63, 0.10);
+    }
+    .thumb { width: 44px; height: 44px; border-radius: 10px; }
+    .selected-thumb { width: 64px; height: 64px; border-radius: 14px; }
+    .selected-head, .planner-item { display: grid; gap: 12px; align-items: start; }
+    .selected-head { grid-template-columns: 72px 1fr; }
+    .planner-item { grid-template-columns: 56px 1fr; padding: 10px 0; border-bottom: 1px solid rgba(20, 38, 63, 0.08); }
+    .planner-item:last-child { border-bottom: 0; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid rgba(20, 38, 63, 0.08); vertical-align: top; }
+    .warning { color: #8a2d0a; margin: 0 0 8px; line-height: 1.5; }
+    .pill {
+      display: inline-block;
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: rgba(19, 78, 74, 0.10);
+      color: var(--accent-3);
+      font-size: 12px;
+      font-weight: 700;
+      margin-right: 6px;
+    }
+    .save { color: var(--save); font-weight: 700; }
+    .stream-status { color: var(--muted); margin-bottom: 12px; min-height: 22px; }
+    .result-block { display: none; }
+    @media (max-width: 1024px) {
+      .hero, .layout, .split { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 760px) {
+      .field-grid, .metric-grid, .planner-grid { grid-template-columns: 1fr; }
+      .page { padding: 20px 14px 64px; }
+    }
+    {% block extra_style %}{% endblock %}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <a href="/" class="brand">Supermarkt Planner</a>
+      <nav class="nav">
+        <a href="/" class="{% if page_key == 'nutrition' %}active{% endif %}">Nutrition Search</a>
+        <a href="/shopping-list/" class="{% if page_key == 'shopping' %}active{% endif %}">Shopping List Cost</a>
+        <a href="/recipe-planner/" class="{% if page_key == 'recipe' %}active{% endif %}">Recipe Planner</a>
+        <a href="/image-recipe-planner/" class="{% if page_key == 'image_recipe' %}active{% endif %}">Image Recipe Planner</a>
+        <a href="/profile/" class="{% if page_key == 'profile' %}active{% endif %}">Profile</a>
+        <a href="/logout/">Log out</a>
+      </nav>
+    </div>
+    {% block content %}{% endblock %}
+  </div>
+  {% block extra_scripts %}{% endblock %}
+</body>
+</html>

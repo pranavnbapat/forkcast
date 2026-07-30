@@ -1,0 +1,133 @@
+{% extends "catalog/app_base.html" %}
+
+{% block title %}Profile{% endblock %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-card">
+      <h1>Profile for {{ request.user.username }}</h1>
+      <p>Save your goals, body metrics, food preferences, allergies, culture, and lifestyle once here. The recipe planners will reuse this profile automatically so you no longer need to re-enter these details on every recipe screen.</p>
+    </div>
+    <aside class="stats">
+      <h2>Estimated Metrics</h2>
+      {% if metrics %}
+        <div class="metric-grid">
+          <div class="metric"><strong>BMI</strong><span>{{ metrics.bmi }}</span></div>
+          <div class="metric"><strong>BMR</strong><span>{{ metrics.bmr_kcal }} kcal</span></div>
+          <div class="metric"><strong>TDEE</strong><span>{{ metrics.tdee_kcal }} kcal</span></div>
+          <div class="metric"><strong>Lifestyle</strong><span style="font-size: 16px;">{{ profile_obj.get_lifestyle_display|default:"Not set" }}</span></div>
+        </div>
+      {% else %}
+        <div class="summary">
+          <strong>Metrics not ready yet</strong>
+          <p>Add age, gender, height, weight, and lifestyle to unlock BMI, BMR, and TDEE-guided planning.</p>
+        </div>
+      {% endif %}
+    </aside>
+  </section>
+
+  <section class="layout">
+    <div class="panel">
+      <h2>Health and Goal Profile</h2>
+      <form method="post">
+        {% csrf_token %}
+        <div class="field-grid" style="margin-top: 18px;">
+          <div class="field">
+            <label for="{{ form.primary_goal.id_for_label }}">Primary Goal</label>
+            {{ form.primary_goal }}
+            <div class="help">Main nutrition objective such as fat loss, maintenance, protein focus, sustainability, or saving money.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.secondary_goal.id_for_label }}">Secondary Goal</label>
+            {{ form.secondary_goal }}
+            <div class="help">Used when the planner needs to balance tradeoffs across cost, nutrition, environment, and convenience.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.gender.id_for_label }}">Gender</label>
+            {{ form.gender }}
+            <div class="help">Used only for BMR estimation and calorie context.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.age.id_for_label }}">Age</label>
+            {{ form.age }}
+            <div class="help">Helps calibrate energy estimates and portions.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.height_cm.id_for_label }}">Height (cm)</label>
+            {{ form.height_cm }}
+            <div class="help">Needed for BMI, BMR, and TDEE.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.weight_kg.id_for_label }}">Weight (kg)</label>
+            {{ form.weight_kg }}
+            <div class="help">Needed for BMI, BMR, and TDEE.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.lifestyle.id_for_label }}">Lifestyle</label>
+            {{ form.lifestyle }}
+            <div class="help">This is what turns BMR into TDEE.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.diet_style.id_for_label }}">Diet Preference</label>
+            {{ form.diet_style }}
+            <div class="help">Filters incompatible dishes and ingredients.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.culture_option.id_for_label }}">Culture</label>
+            {{ form.culture_option }}
+            <div class="help">Biases recipe style and ingredient familiarity.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.cuisine_option.id_for_label }}">Cuisine Preference</label>
+            {{ form.cuisine_option }}
+            <div class="help">Biases the recipe style that gets suggested.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.culture.id_for_label }}">Culture / Cuisine Detail</label>
+            {{ form.culture }}
+            <div class="help">Use this for subcultures or narrower regional styles.</div>
+          </div>
+          <div class="field">
+            <label for="{{ form.fasting_pattern.id_for_label }}">Fasting</label>
+            {{ form.fasting_pattern }}
+            <div class="help">Example: `16:8`, `Ramadan`, or `none`.</div>
+          </div>
+          <div class="field full">
+            <label for="{{ form.allergies.id_for_label }}">Allergies / Exclusions</label>
+            {{ form.allergies }}
+            <div class="help">Critical for safe recipe filtering.</div>
+          </div>
+          <div class="field full">
+            <label for="{{ form.notes.id_for_label }}">Extra Planning Context</label>
+            {{ form.notes }}
+            <div class="help">Add preferences like one-pan meals, low effort dinners, high-satiety lunches, or limited prep time.</div>
+          </div>
+        </div>
+        <div class="actions">
+          <button type="submit">Save Profile</button>
+          <a class="button-link" href="/recipe-planner/">Go to manual planner</a>
+          <a class="button-link" href="/image-recipe-planner/">Go to image planner</a>
+        </div>
+      </form>
+    </div>
+    <aside class="panel" style="display:grid; gap:14px;">
+      <h2>Why this profile matters</h2>
+      <div class="summary">
+        <strong>Metabolic context</strong>
+        <p>Height, weight, age, gender, and lifestyle are used to estimate BMI, BMR, and TDEE. Those values are passed to the LLM so recipe advice can be aligned with maintenance, loss, or gain goals.</p>
+      </div>
+      <div class="summary">
+        <strong>Culture and cuisine</strong>
+        <p>Culture and cuisine do not change BMR or TDEE, but they do make the suggested dishes more realistic, familiar, and useful.</p>
+      </div>
+      <div class="summary">
+        <strong>Safety and fit</strong>
+        <p>Diet style, fasting, allergies, and exclusions are applied before recipe generation so the planner avoids suggesting something incompatible.</p>
+      </div>
+      <div class="summary">
+        <strong>Admin-managed accounts</strong>
+        <p>Only superusers create accounts. There is no public registration flow, so profile ownership stays controlled from the admin panel.</p>
+      </div>
+    </aside>
+  </section>
+{% endblock %}

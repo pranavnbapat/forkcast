@@ -1,0 +1,114 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>AH Sync Status</h1>
+    <p>
+      <a href="/admin/">Back to admin</a>
+    </p>
+
+    <div class="module" style="margin-bottom: 20px;">
+      <h2>Overall Status</h2>
+      <table>
+        <tbody>
+          <tr><th>Catalog Sync Status</th><td>{{ completion_label }}</td></tr>
+          <tr><th>Reason</th><td>{{ completion_reason }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="module" style="margin-bottom: 20px;">
+      <h2>Live Worker</h2>
+      {% if status %}
+        <table>
+          <tbody>
+            <tr><th>Running</th><td>{{ status.running|yesno:"Yes,No" }}</td></tr>
+            <tr><th>Phase</th><td>{{ status.phase|default:"-" }}</td></tr>
+            <tr><th>Message</th><td>{{ status.message|default:"-" }}</td></tr>
+            <tr><th>Updated At</th><td>{{ status.updated_at|default:"-" }}</td></tr>
+            <tr><th>PID</th><td>{{ status.pid|default:"-" }}</td></tr>
+            <tr><th>Batch Number</th><td>{{ status.batch_number|default:"-" }}</td></tr>
+            <tr><th>Remaining Missing</th><td>{{ status.remaining_missing|default:"-" }}</td></tr>
+            <tr><th>Error</th><td>{{ status.error|default:"-" }}</td></tr>
+          </tbody>
+        </table>
+      {% else %}
+        <p>No startup status file found yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="module" style="margin-bottom: 20px;">
+      <h2>Catalog Coverage</h2>
+      <table>
+        <tbody>
+          <tr><th>Total Products</th><td>{{ total_products }}</td></tr>
+          <tr><th>Food Candidate Products</th><td>{{ food_candidate_products }}</td></tr>
+          <tr><th>Products With Nutrition</th><td>{{ products_with_nutrition }}</td></tr>
+          <tr><th>Nutrition Unavailable From AH</th><td>{{ products_marked_nutrition_unavailable }}</td></tr>
+          <tr><th>Products Missing Nutrition</th><td>{{ products_missing_nutrition }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="module" style="margin-bottom: 20px;">
+      <h2>OpenSearch</h2>
+      <table>
+        <tbody>
+          <tr><th>Enabled</th><td>{{ opensearch_status.enabled|yesno:"Yes,No" }}</td></tr>
+          <tr><th>Configured</th><td>{{ opensearch_status.configured|yesno:"Yes,No" }}</td></tr>
+          <tr><th>Reachable</th><td>{{ opensearch_status.reachable|yesno:"Yes,No" }}</td></tr>
+          <tr><th>Index Name</th><td>{{ opensearch_status.index_name|default:"-" }}</td></tr>
+          <tr><th>Index Exists</th><td>{{ opensearch_status.index_exists|yesno:"Yes,No" }}</td></tr>
+          <tr><th>Document Count</th><td>{{ opensearch_status.document_count|default:"-" }}</td></tr>
+          <tr><th>URL</th><td>{{ opensearch_status.url|default:"-" }}</td></tr>
+          <tr><th>Error</th><td>{{ opensearch_status.error|default:"-" }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="module" style="margin-bottom: 20px;">
+      <h2>Latest Runs</h2>
+      <table>
+        <tbody>
+          <tr>
+            <th>Last Inventory Sync</th>
+            <td>
+              {% if latest_inventory_run %}
+                {{ latest_inventory_run.created_at }} |
+                {{ latest_inventory_run.mode }} |
+                rows={{ latest_inventory_run.rows_imported }} |
+                pages={{ latest_inventory_run.pages_visited }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th>Last Nutrition Sync</th>
+            <td>
+              {% if latest_nutrition_run %}
+                {{ latest_nutrition_run.created_at }} |
+                {{ latest_nutrition_run.mode }} |
+                rows={{ latest_nutrition_run.rows_imported }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+          <tr>
+            <th>Last Failure</th>
+            <td>
+              {% if latest_failure %}
+                {{ latest_failure.created_at }} |
+                {{ latest_failure.mode }} |
+                {{ latest_failure.notes }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}

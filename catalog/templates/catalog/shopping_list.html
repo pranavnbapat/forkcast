@@ -1,0 +1,199 @@
+{% extends "catalog/app_base.html" %}
+
+{% block title %}Shopping List Cost{% endblock %}
+
+{% block extra_style %}
+  .row { grid-template-columns: minmax(280px, 1.7fr) 120px; }
+{% endblock %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-card">
+      <h1>Shopping List Cost</h1>
+      <p>Build a local buy list from the imported AH catalog and see the current total, the regular total without bonus, and the savings from bonus items.</p>
+    </div>
+    <aside class="stats">
+      <h2>Price Logic</h2>
+      <div class="summary">
+        <strong>Current vs regular</strong>
+        <p>The calculator uses the latest local price snapshot and compares current bonus pricing with the pre-bonus price where available.</p>
+      </div>
+      <div class="summary">
+        <strong>Bundle-aware savings</strong>
+        <p>Rules like 1+1 gratis and volume discounts are applied instead of naive price × quantity math.</p>
+      </div>
+    </aside>
+  </section>
+
+  <div class="card">
+    <form method="post" id="shopping-form">
+      {% csrf_token %}
+      <div class="rows" id="rows">
+        <div class="row">
+          <div>
+            <input type="hidden" name="product_id">
+            <input type="text" name="product_name" placeholder="Search product, e.g. avocado or monini olijfolie" autocomplete="off">
+            <div class="suggestions"></div>
+          </div>
+          <div>
+            <input type="number" step="0.01" min="0" name="quantity" value="1" placeholder="Qty">
+          </div>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button type="button" id="add-row" class="secondary">Add Product</button>
+        <button type="submit">Calculate Cost</button>
+      </div>
+    </form>
+  </div>
+
+  {% if warnings %}
+    <div class="card">
+      {% for warning in warnings %}
+        <p class="warning">{{ warning }}</p>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <div class="split">
+    <div class="card">
+      <h2>Selected Items</h2>
+      {% if selected_rows %}
+        <table>
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>Qty</th>
+              <th>Current</th>
+              <th>Regular</th>
+              <th>Savings</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in selected_rows %}
+              <tr>
+                <td>
+                  <div class="selected-head" style="grid-template-columns:64px 1fr;">
+                    {% if row.product.image_url %}
+                      <img src="{{ row.product.image_url }}" alt="{{ row.product.name }}" class="selected-thumb">
+                    {% endif %}
+                    <div>
+                      <strong>{{ row.product.name }}</strong>
+                      <div class="muted">
+                        {{ row.product.package_size }}
+                        {% if row.is_bonus %}
+                          · Bonus{% if row.bonus_label %}: {{ row.bonus_label }}{% endif %}
+                        {% endif %}
+                        {% if row.pricing_note %}
+                          · {{ row.pricing_note }}
+                        {% endif %}
+                      </div>
+                    </div>
+                  </div>
+                </td>
+                <td>{{ row.quantity }}</td>
+                <td>{% if row.current_total is not None %}€ {{ row.current_total|floatformat:2 }}{% else %}-{% endif %}</td>
+                <td>{% if row.regular_total is not None %}€ {{ row.regular_total|floatformat:2 }}{% else %}-{% endif %}</td>
+                <td class="save">{% if row.savings_total is not None %}€ {{ row.savings_total|floatformat:2 }}{% else %}-{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">No products selected yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Totals</h2>
+      {% if totals %}
+        <table>
+          <tbody>
+            <tr><th>With Current Price</th><td>€ {{ totals.current_total|floatformat:2 }}</td></tr>
+            <tr><th>Without Bonus</th><td>€ {{ totals.regular_total|floatformat:2 }}</td></tr>
+            <tr><th>You Save</th><td class="save">€ {{ totals.savings_total|floatformat:2 }}</td></tr>
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">Search products above and submit the form to calculate totals.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <template id="row-template">
+    <div class="row">
+      <div>
+        <input type="hidden" name="product_id">
+        <input type="text" name="product_name" placeholder="Search product" autocomplete="off">
+        <div class="suggestions"></div>
+      </div>
+      <div>
+        <input type="number" step="0.01" min="0" name="quantity" value="1" placeholder="Qty">
+      </div>
+    </div>
+  </template>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script>
+    const rows = document.getElementById("rows");
+    const template = document.getElementById("row-template");
+    const addButton = document.getElementById("add-row");
+
+    function wireRow(row) {
+      const textInput = row.querySelector('input[name="product_name"]');
+      const hiddenInput = row.querySelector('input[name="product_id"]');
+      const suggestions = row.querySelector(".suggestions");
+      let controller = null;
+
+      textInput.addEventListener("input", async () => {
+        hiddenInput.value = "";
+        const q = textInput.value.trim();
+        if (q.length < 2) {
+          suggestions.style.display = "none";
+          suggestions.innerHTML = "";
+          return;
+        }
+        if (controller) controller.abort();
+        controller = new AbortController();
+        const response = await fetch(`/api/products/search/?q=${encodeURIComponent(q)}`, { signal: controller.signal });
+        const data = await response.json();
+        suggestions.innerHTML = "";
+        for (const item of data.results) {
+          const option = document.createElement("div");
+          option.className = "suggestion";
+          const priceText = item.price_amount !== null ? ` · € ${Number(item.price_amount).toFixed(2)}` : "";
+          const bonusText = item.is_bonus ? " · bonus" : "";
+          option.innerHTML = `
+            <div class="suggestion-item">
+              ${item.image_url ? `<img src="${item.image_url}" alt="" class="thumb">` : `<div class="thumb"></div>`}
+              <div>${item.name}${item.brand ? " · " + item.brand : ""}${priceText}${bonusText}</div>
+            </div>
+          `;
+          option.addEventListener("click", () => {
+            textInput.value = item.name;
+            hiddenInput.value = item.id;
+            suggestions.style.display = "none";
+            suggestions.innerHTML = "";
+          });
+          suggestions.appendChild(option);
+        }
+        suggestions.style.display = data.results.length ? "block" : "none";
+      });
+
+      document.addEventListener("click", (event) => {
+        if (!row.contains(event.target)) {
+          suggestions.style.display = "none";
+        }
+      });
+    }
+
+    addButton.addEventListener("click", () => {
+      const fragment = template.content.cloneNode(true);
+      rows.appendChild(fragment);
+      wireRow(rows.lastElementChild);
+    });
+
+    document.querySelectorAll(".row").forEach(wireRow);
+  </script>
+{% endblock %}

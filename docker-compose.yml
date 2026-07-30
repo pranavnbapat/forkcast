@@ -1,0 +1,57 @@
+services:
+  forkcast_mysql:
+    image: mysql:8.4
+    container_name: forkcast_mysql
+    restart: always
+    environment:
+      MYSQL_DATABASE: supermarkt
+      MYSQL_USER: supermarkt
+      MYSQL_PASSWORD: supermarkt
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports:
+      - "3315:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  forkcast_pma:
+    image: phpmyadmin:5
+    container_name: forkcast_pma
+    restart: always
+    depends_on:
+      - forkcast_mysql
+    environment:
+      PMA_HOST: forkcast_mysql
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: rootpass
+    ports:
+      - "8091:80"
+
+  forkcast_opensearch:
+    image: opensearchproject/opensearch:3.2.0
+    container_name: forkcast_opensearch
+    restart: always
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms2g -Xmx2g"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9201:9200"
+      - "9601:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+
+volumes:
+  mysql_data:
+  opensearch_data:

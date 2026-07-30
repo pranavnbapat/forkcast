@@ -1,0 +1,27 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Django
+staticfiles/
+*.sqlite3
+media/
+logs/
+*.log
+
+# Tooling
+.idea/
+.vscode/
+.claude/
+.DS_Store
+
+# Local data
+*.xlsx

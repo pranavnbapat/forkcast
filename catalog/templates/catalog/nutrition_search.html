@@ -1,0 +1,256 @@
+{% extends "catalog/app_base.html" %}
+
+{% block title %}Nutrition Search{% endblock %}
+
+{% block extra_style %}
+  .row { grid-template-columns: minmax(280px, 1.7fr) 120px 120px; }
+{% endblock %}
+
+{% block content %}
+  <section class="hero">
+    <div class="hero-card">
+      <h1>Nutrition Search</h1>
+      <p>Search the local AH catalog, select one or more imported products, enter the amount you plan to use, and get a combined nutrition profile from the stored per-100 values.</p>
+    </div>
+    <aside class="stats">
+      <h2>How it works</h2>
+      <div class="summary">
+        <strong>Local catalog only</strong>
+        <p>Results come from your local synced AH catalog, not a live website scrape on each request.</p>
+      </div>
+      <div class="summary">
+        <strong>Per-100 scaling</strong>
+        <p>The totals scale from stored per-100 nutrition rows and preserve AH labels where possible.</p>
+      </div>
+    </aside>
+  </section>
+
+  <div class="card">
+    <form method="post" id="nutrition-form">
+      {% csrf_token %}
+      <div class="rows" id="rows">
+        <div class="row">
+          <div>
+            <input type="hidden" name="product_id">
+            <input type="text" name="product_name" placeholder="Search product, e.g. avocado or bananen tros" autocomplete="off">
+            <div class="suggestions"></div>
+          </div>
+          <div>
+            <input type="number" step="0.01" min="0" name="quantity" value="100" placeholder="Amount">
+          </div>
+          <div>
+            <select name="unit">
+              <option value="g">g</option>
+              <option value="kg">kg</option>
+              <option value="ml">ml</option>
+              <option value="tsp">tsp</option>
+              <option value="tbsp">tbsp</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="toolbar">
+        <button type="button" id="add-row" class="secondary">Add Product</button>
+        <button type="submit">Calculate Nutrition</button>
+      </div>
+    </form>
+  </div>
+
+  {% if warnings %}
+    <div class="card">
+      {% for warning in warnings %}
+        <p class="warning">{{ warning }}</p>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <div class="split">
+    <div class="card">
+      <h2>Selected Products</h2>
+      {% if selected_rows %}
+        {% for profile in selected_rows %}
+          <div style="margin-bottom: 18px;">
+            <div class="selected-head">
+              {% if profile.product.image_url %}
+                <img src="{{ profile.product.image_url }}" alt="{{ profile.product.name }}" class="selected-thumb">
+              {% endif %}
+              <div>
+                <strong>{{ profile.product.name }}</strong>
+                <div class="muted">{{ profile.grams }} g{% if profile.nutri_score_grade %} · Nutri-Score {{ profile.nutri_score_grade }}{% endif %}</div>
+                {% if profile.macro_summary.declared_energy_kcal or profile.macro_summary.estimated_energy_kcal %}
+                  <div class="muted" style="margin-top: 6px;">
+                    {% if profile.macro_summary.declared_energy_kj %}
+                      Declared energy: {{ profile.macro_summary.declared_energy_kj|floatformat:2 }} kJ ({{ profile.macro_summary.declared_energy_kcal|floatformat:2 }} kcal)
+                    {% endif %}
+                    {% if profile.macro_summary.estimated_energy_kcal %}
+                      {% if profile.macro_summary.declared_energy_kj %} · {% endif %}
+                      Estimated from macros: {{ profile.macro_summary.estimated_energy_kcal|floatformat:2 }} kcal
+                    {% endif %}
+                  </div>
+                {% endif %}
+              </div>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Label</th>
+                  <th>Per 100</th>
+                  <th>Scaled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in profile.rows %}
+                  <tr>
+                    <td>{{ row.label }}</td>
+                    <td>{{ row.per_100 }}</td>
+                    <td>
+                      {% if row.scaled_energy_kj is not None %}
+                        {{ row.scaled_energy_kj|floatformat:2 }} kJ ({{ row.scaled_energy_kcal|floatformat:2 }} kcal)
+                      {% elif row.scaled_value is not None %}
+                        {{ row.scaled_value|floatformat:2 }} {{ row.unit }}
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted">No products selected yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>Combined Total</h2>
+      {% if combined_rows %}
+        {% if combined_macro_summary %}
+          <div class="summary" style="margin-bottom: 12px;">
+            {% if combined_macro_summary.declared_energy_kj %}
+              <div>Declared energy total: {{ combined_macro_summary.declared_energy_kj|floatformat:2 }} kJ ({{ combined_macro_summary.declared_energy_kcal|floatformat:2 }} kcal)</div>
+            {% endif %}
+            {% if combined_macro_summary.estimated_energy_kcal %}
+              <div>Estimated from macros: {{ combined_macro_summary.estimated_energy_kcal|floatformat:2 }} kcal{% if combined_macro_summary.estimated_energy_kj %} ({{ combined_macro_summary.estimated_energy_kj|floatformat:2 }} kJ){% endif %}</div>
+            {% endif %}
+            {% if combined_macro_summary.protein_g or combined_macro_summary.fat_g or combined_macro_summary.carbohydrates_g %}
+              <div>
+                Macros:
+                {% if combined_macro_summary.protein_g %} protein {{ combined_macro_summary.protein_g|floatformat:2 }} g{% endif %}
+                {% if combined_macro_summary.fat_g %} · fat {{ combined_macro_summary.fat_g|floatformat:2 }} g{% endif %}
+                {% if combined_macro_summary.carbohydrates_g %} · carbs {{ combined_macro_summary.carbohydrates_g|floatformat:2 }} g{% endif %}
+              </div>
+            {% endif %}
+          </div>
+        {% endif %}
+        <table>
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in combined_rows %}
+              <tr>
+                <td>{{ row.label }}</td>
+                <td>
+                  {% if row.display_value %}
+                    {{ row.display_value }}
+                  {% else %}
+                    {{ row.value|floatformat:2 }} {{ row.unit }}
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">Search products above and submit the form to calculate totals.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <template id="row-template">
+    <div class="row">
+      <div>
+        <input type="hidden" name="product_id">
+        <input type="text" name="product_name" placeholder="Search product" autocomplete="off">
+        <div class="suggestions"></div>
+      </div>
+      <div>
+        <input type="number" step="0.01" min="0" name="quantity" value="100" placeholder="Amount">
+      </div>
+      <div>
+        <select name="unit">
+          <option value="g">g</option>
+          <option value="kg">kg</option>
+          <option value="ml">ml</option>
+          <option value="tsp">tsp</option>
+          <option value="tbsp">tbsp</option>
+        </select>
+      </div>
+    </div>
+  </template>
+{% endblock %}
+
+{% block extra_scripts %}
+  <script>
+    const rows = document.getElementById("rows");
+    const template = document.getElementById("row-template");
+    const addButton = document.getElementById("add-row");
+
+    function wireRow(row) {
+      const textInput = row.querySelector('input[name="product_name"]');
+      const hiddenInput = row.querySelector('input[name="product_id"]');
+      const suggestions = row.querySelector(".suggestions");
+      let controller = null;
+
+      textInput.addEventListener("input", async () => {
+        hiddenInput.value = "";
+        const q = textInput.value.trim();
+        if (q.length < 2) {
+          suggestions.style.display = "none";
+          suggestions.innerHTML = "";
+          return;
+        }
+        if (controller) controller.abort();
+        controller = new AbortController();
+        const response = await fetch(`/api/products/search/?q=${encodeURIComponent(q)}`, { signal: controller.signal });
+        const data = await response.json();
+        suggestions.innerHTML = "";
+        for (const item of data.results) {
+          const option = document.createElement("div");
+          option.className = "suggestion";
+          option.innerHTML = `
+            <div class="suggestion-item">
+              ${item.image_url ? `<img src="${item.image_url}" alt="" class="thumb">` : `<div class="thumb"></div>`}
+              <div>${item.name}${item.brand ? " · " + item.brand : ""}${item.nutri_score_grade ? " · Nutri-Score " + item.nutri_score_grade : ""}${item.has_nutrition ? " · nutrition ready" : " · inventory only"}</div>
+            </div>
+          `;
+          option.addEventListener("click", () => {
+            textInput.value = item.name;
+            hiddenInput.value = item.id;
+            suggestions.style.display = "none";
+            suggestions.innerHTML = "";
+          });
+          suggestions.appendChild(option);
+        }
+        suggestions.style.display = data.results.length ? "block" : "none";
+      });
+
+      document.addEventListener("click", (event) => {
+        if (!row.contains(event.target)) {
+          suggestions.style.display = "none";
+        }
+      });
+    }
+
+    addButton.addEventListener("click", () => {
+      const fragment = template.content.cloneNode(true);
+      rows.appendChild(fragment);
+      wireRow(rows.lastElementChild);
+    });
+
+    document.querySelectorAll(".row").forEach(wireRow);
+  </script>
+{% endblock %}
