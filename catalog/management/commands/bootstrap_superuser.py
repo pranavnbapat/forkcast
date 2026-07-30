@@ -1,7 +1,7 @@
 import os
 
 from django.contrib.auth import get_user_model
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 
 class Command(BaseCommand):
@@ -10,7 +10,12 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         username = os.getenv("DJANGO_SUPERUSER_USERNAME", "admin")
         email = os.getenv("DJANGO_SUPERUSER_EMAIL", "admin@example.com")
-        password = os.getenv("DJANGO_SUPERUSER_PASSWORD", "admin1234!")
+        password = os.getenv("DJANGO_SUPERUSER_PASSWORD", "")
+        if not password:
+            raise CommandError(
+                "DJANGO_SUPERUSER_PASSWORD is not set. Set it in .env before running this command; "
+                "there is deliberately no default, because this command grants superuser access."
+            )
 
         user_model = get_user_model()
         user, created = user_model.objects.get_or_create(

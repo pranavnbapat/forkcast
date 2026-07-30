@@ -187,6 +187,8 @@ set -a && source .env && set +a
 
 ### 4. Bootstrap the admin user
 
+Set `DJANGO_SUPERUSER_PASSWORD` in `.env` first. The command has no default password and fails loudly if it is blank, because it grants superuser access. Re-running it resets the password for an existing user.
+
 ```bash
 set -a && source .env && set +a
 .venv/bin/python manage.py bootstrap_superuser
