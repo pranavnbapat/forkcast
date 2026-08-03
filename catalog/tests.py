@@ -12,14 +12,17 @@ from catalog.models import (
     CategoryScope,
     CuisineOption,
     CultureOption,
+    DataSource,
     Goal,
     IngredientImageAnalysis,
     IngredientPlan,
     IngredientPlanItem,
     NutritionEntry,
     NutritionFacts,
+    OpenFoodFactsProduct,
     PlannerProfile,
     Product,
+    ProductIdentifier,
     ProductQualityProfile,
     ProductSnapshot,
     RecipeSuggestionRun,
@@ -1164,3 +1167,686 @@ class ProductQualityTests(TestCase):
                 source_name="vllm_default",
             ).exists()
         )
+
+
+class DataSourceSeedTests(TestCase):
+    def test_migration_seeds_expected_sources(self):
+        slugs = set(DataSource.objects.values_list("slug", flat=True))
+
+        self.assertIn("albert-heijn", slugs)
+        self.assertIn("openfoodfacts", slugs)
+        self.assertIn("vllm-default", slugs)
+
+    def test_openfoodfacts_carries_attribution_obligation(self):
+        off = DataSource.objects.get(slug="openfoodfacts")
+
+        self.assertEqual(off.kind, DataSource.Kind.REFERENCE_DB)
+        self.assertTrue(off.attribution_required)
+        self.assertIn("ODbL", off.license_name)
+        self.assertTrue(off.attribution_text)
+
+    def test_retailer_outranks_reference_db_and_llm(self):
+        ah = DataSource.objects.get(slug="albert-heijn")
+        off = DataSource.objects.get(slug="openfoodfacts")
+        llm = DataSource.objects.get(slug="vllm-default")
+
+        self.assertLess(ah.trust_rank, off.trust_rank)
+        self.assertLess(off.trust_rank, llm.trust_rank)
+
+    def test_existing_supermarket_is_linked_to_its_source(self):
+        supermarket, _ = Supermarket.objects.get_or_create(
+            slug="albert-heijn",
+            defaults={"name": "Albert Heijn"},
+        )
+
+        self.assertIsNotNone(supermarket.data_source)
+        self.assertEqual(supermarket.data_source.slug, "albert-heijn")
+
+
+class ProductIdentifierTests(TestCase):
+    def setUp(self):
+        self.supermarket, _ = Supermarket.objects.get_or_create(
+            slug="albert-heijn",
+            defaults={"name": "Albert Heijn"},
+        )
+        self.source = DataSource.objects.get(slug="albert-heijn")
+        self.off_source = DataSource.objects.get(slug="openfoodfacts")
+        self.product = Product.objects.create(
+            supermarket=self.supermarket,
+            name="AH Bananen tros",
+            source_url="https://www.ah.nl/producten/product/wi197393/ah-bananen-tros",
+            external_id="wi197393",
+        )
+
+    def test_same_identifier_cannot_be_recorded_twice_for_one_source(self):
+        from django.db import IntegrityError, transaction
+
+        ProductIdentifier.objects.create(
+            product=self.product,
+            source=self.source,
+            id_type=ProductIdentifier.IdType.AH_WEBSHOP_ID,
+            value="wi197393",
+        )
+
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ProductIdentifier.objects.create(
+                product=self.product,
+                source=self.source,
+                id_type=ProductIdentifier.IdType.AH_WEBSHOP_ID,
+                value="wi197393",
+            )
+
+    def test_two_sources_may_record_their_own_identifier_for_one_product(self):
+        ProductIdentifier.objects.create(
+            product=self.product,
+            source=self.source,
+            id_type=ProductIdentifier.IdType.AH_WEBSHOP_ID,
+            value="wi197393",
+            is_primary=True,
+        )
+        ProductIdentifier.objects.create(
+            product=self.product,
+            source=self.off_source,
+            id_type=ProductIdentifier.IdType.OFF_BARCODE,
+            value="8718907400114",
+            match_method=ProductIdentifier.MatchMethod.FUZZY_NAME,
+            confidence_label="low",
+        )
+
+        self.assertEqual(self.product.identifiers.count(), 2)
+
+    def test_barcode_reverse_lookup_finds_the_product(self):
+        ProductIdentifier.objects.create(
+            product=self.product,
+            source=self.off_source,
+            id_type=ProductIdentifier.IdType.GTIN,
+            value="8718907400114",
+            match_method=ProductIdentifier.MatchMethod.API,
+        )
+
+        found = Product.objects.filter(
+            identifiers__id_type=ProductIdentifier.IdType.GTIN,
+            identifiers__value="8718907400114",
+        ).first()
+
+        self.assertEqual(found, self.product)
+
+    def test_fuzzy_matches_stay_distinguishable_from_api_reported_ones(self):
+        ProductIdentifier.objects.create(
+            product=self.product,
+            source=self.source,
+            id_type=ProductIdentifier.IdType.AH_WEBSHOP_ID,
+            value="wi197393",
+            match_method=ProductIdentifier.MatchMethod.API,
+        )
+        ProductIdentifier.objects.create(
+            product=self.product,
+            source=self.off_source,
+            id_type=ProductIdentifier.IdType.OFF_BARCODE,
+            value="0000000000000",
+            match_method=ProductIdentifier.MatchMethod.FUZZY_NAME,
+        )
+
+        trusted = self.product.identifiers.exclude(
+            match_method=ProductIdentifier.MatchMethod.FUZZY_NAME
+        )
+
+        self.assertEqual(trusted.count(), 1)
+        self.assertEqual(trusted.first().value, "wi197393")
+
+
+class BackfillProductIdentifiersCommandTests(TestCase):
+    def setUp(self):
+        self.supermarket, _ = Supermarket.objects.get_or_create(
+            slug="albert-heijn",
+            defaults={"name": "Albert Heijn"},
+        )
+        self.product = Product.objects.create(
+            supermarket=self.supermarket,
+            name="AH Bananen tros",
+            source_url="https://www.ah.nl/producten/product/wi197393/ah-bananen-tros",
+            external_id="wi197393",
+        )
+        ProductSnapshot.objects.create(
+            product=self.product,
+            price_amount=Decimal("1.45"),
+            price_text="1.45",
+            payload={"product_card": {"hqId": 594399, "webshopId": 197393}},
+            scraped_at=timezone.now(),
+        )
+
+    def _run(self, *extra):
+        from django.core.management import call_command
+
+        call_command("backfill_product_identifiers", *extra)
+
+    def test_backfill_records_the_webshop_id(self):
+        self._run()
+
+        identifier = self.product.identifiers.get(
+            id_type=ProductIdentifier.IdType.AH_WEBSHOP_ID
+        )
+        self.assertEqual(identifier.value, "wi197393")
+        self.assertTrue(identifier.is_primary)
+        self.assertEqual(identifier.source.slug, "albert-heijn")
+
+    def test_backfill_is_idempotent(self):
+        self._run()
+        self._run()
+
+        self.assertEqual(self.product.identifiers.count(), 1)
+
+    def test_dry_run_writes_nothing(self):
+        self._run("--dry-run")
+
+        self.assertEqual(self.product.identifiers.count(), 0)
+
+    def test_from_snapshots_also_records_the_hq_id(self):
+        self._run("--from-snapshots")
+
+        values = set(self.product.identifiers.values_list("id_type", "value"))
+        self.assertIn((ProductIdentifier.IdType.AH_WEBSHOP_ID, "wi197393"), values)
+        self.assertIn((ProductIdentifier.IdType.AH_HQ_ID, "594399"), values)
+
+    def test_products_without_external_id_are_skipped(self):
+        Product.objects.create(
+            supermarket=self.supermarket,
+            name="Nameless",
+            source_url="https://www.ah.nl/producten/product/wi000000/nameless",
+            external_id="",
+        )
+
+        self._run()
+
+        self.assertEqual(ProductIdentifier.objects.count(), 1)
+
+
+class OpenFoodFactsNormalizeTests(SimpleTestCase):
+    def test_maps_nutriments_to_our_field_names(self):
+        from catalog.services.openfoodfacts import normalize_off_payload
+
+        fields = normalize_off_payload(
+            {
+                "code": "8718907400114",
+                "product_name": "Bananen",
+                "brands": "AH",
+                "nutriments": {
+                    "energy-kcal_100g": 91,
+                    "fat_100g": 0.3,
+                    "saturated-fat_100g": 0.1,
+                    "carbohydrates_100g": 20,
+                    "sugars_100g": 16,
+                    "fiber_100g": 1.9,
+                    "proteins_100g": 1.1,
+                    "salt_100g": 0.01,
+                },
+            }
+        )
+
+        self.assertEqual(fields["barcode"], "8718907400114")
+        self.assertEqual(fields["energy_kcal"], Decimal("91.00"))
+        self.assertEqual(fields["protein_g"], Decimal("1.10"))
+        self.assertEqual(fields["fiber_g"], Decimal("1.90"))
+
+    def test_records_without_a_usable_barcode_are_rejected(self):
+        from catalog.services.openfoodfacts import normalize_off_payload
+
+        self.assertIsNone(normalize_off_payload({"product_name": "No barcode"}))
+        self.assertIsNone(normalize_off_payload({"code": "", "product_name": "Empty"}))
+        self.assertIsNone(normalize_off_payload({"code": "0000", "product_name": "All zeroes"}))
+
+    def test_energy_is_derived_when_only_one_unit_is_present(self):
+        from catalog.services.openfoodfacts import normalize_off_payload
+
+        from_kcal = normalize_off_payload({"code": "1", "nutriments": {"energy-kcal_100g": 100}})
+        self.assertEqual(from_kcal["energy_kj"], Decimal("418.40"))
+
+        from_kj = normalize_off_payload({"code": "2", "nutriments": {"energy-kj_100g": 418.4}})
+        self.assertEqual(from_kj["energy_kcal"], Decimal("100.00"))
+
+    def test_salt_and_sodium_fill_each_other_in(self):
+        from catalog.services.openfoodfacts import normalize_off_payload
+
+        from_sodium = normalize_off_payload({"code": "1", "nutriments": {"sodium_100g": 0.4}})
+        self.assertEqual(from_sodium["salt_g"], Decimal("1.00"))
+
+        from_salt = normalize_off_payload({"code": "2", "nutriments": {"salt_100g": 1.0}})
+        self.assertEqual(from_salt["sodium_g"], Decimal("0.40"))
+
+    def test_absurd_outliers_are_discarded_rather_than_stored(self):
+        from catalog.services.openfoodfacts import normalize_off_payload
+
+        fields = normalize_off_payload(
+            {"code": "1", "nutriments": {"proteins_100g": 999999, "fat_100g": -5}}
+        )
+
+        self.assertIsNone(fields["protein_g"])
+        self.assertIsNone(fields["fat_g"])
+
+    def test_content_hash_ignores_untracked_fields(self):
+        from catalog.services.openfoodfacts import normalize_off_payload
+
+        base = {"code": "1", "product_name": "X", "nutriments": {"proteins_100g": 5}}
+        same = normalize_off_payload({**base, "categories_tags": ["en:snacks"]})
+        other = normalize_off_payload(base)
+
+        self.assertEqual(same["content_hash"], other["content_hash"])
+
+    def test_content_hash_changes_when_nutrition_changes(self):
+        from catalog.services.openfoodfacts import normalize_off_payload
+
+        first = normalize_off_payload({"code": "1", "nutriments": {"proteins_100g": 5}})
+        second = normalize_off_payload({"code": "1", "nutriments": {"proteins_100g": 6}})
+
+        self.assertNotEqual(first["content_hash"], second["content_hash"])
+
+
+class OpenFoodFactsIngestTests(TestCase):
+    def _payload(self, barcode, **overrides):
+        payload = {
+            "code": barcode,
+            "product_name": f"Product {barcode}",
+            "countries_tags": ["en:netherlands"],
+            "nutriments": {"proteins_100g": 5, "energy-kcal_100g": 100},
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_ingest_creates_staged_records(self):
+        from catalog.services.openfoodfacts import OpenFoodFactsIngestor
+
+        stats = OpenFoodFactsIngestor().ingest([self._payload("111"), self._payload("222")])
+
+        self.assertEqual(stats["created"], 2)
+        self.assertEqual(OpenFoodFactsProduct.objects.count(), 2)
+        self.assertEqual(
+            OpenFoodFactsProduct.objects.get(barcode="111").source.slug, "openfoodfacts"
+        )
+
+    def test_unchanged_records_are_not_rewritten(self):
+        from catalog.services.openfoodfacts import OpenFoodFactsIngestor
+
+        OpenFoodFactsIngestor().ingest([self._payload("111")])
+        stats = OpenFoodFactsIngestor().ingest([self._payload("111")])
+
+        self.assertEqual(stats["created"], 0)
+        self.assertEqual(stats["unchanged"], 1)
+        self.assertEqual(stats["updated"], 0)
+
+    def test_changed_records_are_updated(self):
+        from catalog.services.openfoodfacts import OpenFoodFactsIngestor
+
+        OpenFoodFactsIngestor().ingest([self._payload("111")])
+        changed = self._payload("111", nutriments={"proteins_100g": 9, "energy-kcal_100g": 100})
+        stats = OpenFoodFactsIngestor().ingest([changed])
+
+        self.assertEqual(stats["updated"], 1)
+        self.assertEqual(
+            OpenFoodFactsProduct.objects.get(barcode="111").protein_g, Decimal("9.00")
+        )
+
+    def test_country_filter_skips_other_countries(self):
+        from catalog.services.openfoodfacts import OpenFoodFactsIngestor
+
+        stats = OpenFoodFactsIngestor().ingest(
+            [
+                self._payload("111", countries_tags=["en:netherlands"]),
+                self._payload("222", countries_tags=["en:france"]),
+            ],
+            country_tag="en:netherlands",
+        )
+
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertFalse(OpenFoodFactsProduct.objects.filter(barcode="222").exists())
+
+    def test_staged_records_are_not_linked_to_products(self):
+        from catalog.services.openfoodfacts import OpenFoodFactsIngestor
+
+        OpenFoodFactsIngestor().ingest([self._payload("111")])
+
+        # Phase 2 stages data only; matching to Product happens in Phase 3.
+        self.assertFalse(hasattr(OpenFoodFactsProduct.objects.get(barcode="111"), "product"))
+
+
+class ImportOpenFoodFactsCommandTests(TestCase):
+    def test_command_ingests_a_jsonl_dump(self):
+        import json as json_module
+        import tempfile
+        from pathlib import Path as PathLib
+        from django.core.management import call_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dump = PathLib(tmp) / "off.jsonl"
+            dump.write_text(
+                "\n".join(
+                    [
+                        json_module.dumps(
+                            {
+                                "code": "8718907400114",
+                                "product_name": "Bananen",
+                                "countries_tags": ["en:netherlands"],
+                                "nutriments": {"proteins_100g": 1.1},
+                            }
+                        ),
+                        "{ this line is corrupt",
+                        json_module.dumps(
+                            {
+                                "code": "3017620422003",
+                                "product_name": "Elsewhere",
+                                "countries_tags": ["en:france"],
+                                "nutriments": {"proteins_100g": 6},
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            call_command("import_openfoodfacts", "--dump", str(dump), "--country-tag", "en:netherlands")
+
+        self.assertTrue(OpenFoodFactsProduct.objects.filter(barcode="8718907400114").exists())
+        self.assertFalse(OpenFoodFactsProduct.objects.filter(barcode="3017620422003").exists())
+
+    def test_missing_dump_file_fails_cleanly(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("import_openfoodfacts", "--dump", "/nonexistent/off.jsonl")
+
+
+class OpenFoodFactsMatchingTests(TestCase):
+    def setUp(self):
+        from catalog.services.openfoodfacts import OpenFoodFactsIngestor
+
+        self.supermarket, _ = Supermarket.objects.get_or_create(
+            slug="albert-heijn",
+            defaults={"name": "Albert Heijn"},
+        )
+        self.ah_source = DataSource.objects.get(slug="albert-heijn")
+        self.off_source = DataSource.objects.get(slug="openfoodfacts")
+        self.product = Product.objects.create(
+            supermarket=self.supermarket,
+            name="AH Bananen tros",
+            brand="AH",
+            package_size="1 kg",
+            source_url="https://www.ah.nl/producten/product/wi197393/ah-bananen-tros",
+            external_id="wi197393",
+        )
+        OpenFoodFactsIngestor().ingest(
+            [
+                {
+                    "code": "8718907400114",
+                    "product_name": "Bananen tros",
+                    "brands": "AH",
+                    "quantity": "1 kg",
+                    "countries_tags": ["en:netherlands"],
+                    "nutriments": {"proteins_100g": 1.1, "fiber_100g": 1.9},
+                },
+                {
+                    "code": "3017620422003",
+                    "product_name": "Hazelnootpasta",
+                    "brands": "Nutella",
+                    "countries_tags": ["en:netherlands"],
+                    "nutriments": {"proteins_100g": 6},
+                },
+            ]
+        )
+
+    def test_barcode_join_reports_nothing_when_no_gtins_recorded(self):
+        from catalog.services.matching import match_by_barcode
+
+        stats = match_by_barcode()
+
+        self.assertEqual(stats["matched"], 0)
+        self.assertIn("no GTIN", stats["note"])
+
+    def test_barcode_join_links_deterministically_when_a_gtin_exists(self):
+        from catalog.services.matching import match_by_barcode
+
+        ProductIdentifier.objects.create(
+            product=self.product,
+            source=self.ah_source,
+            id_type=ProductIdentifier.IdType.GTIN,
+            value="8718907400114",
+            match_method=ProductIdentifier.MatchMethod.API,
+        )
+
+        stats = match_by_barcode()
+
+        self.assertEqual(stats["matched"], 1)
+        self.assertEqual(stats["created"], 1)
+        link = self.product.identifiers.get(id_type=ProductIdentifier.IdType.OFF_BARCODE)
+        self.assertEqual(link.match_method, ProductIdentifier.MatchMethod.BARCODE)
+        self.assertEqual(link.confidence_label, "high")
+
+    def test_fuzzy_match_links_the_right_off_record(self):
+        from catalog.services.matching import match_by_name
+
+        stats = match_by_name(threshold=0.6)
+
+        self.assertEqual(stats["matched"], 1)
+        link = self.product.identifiers.get(id_type=ProductIdentifier.IdType.OFF_BARCODE)
+        self.assertEqual(link.value, "8718907400114")
+        self.assertEqual(link.match_method, ProductIdentifier.MatchMethod.FUZZY_NAME)
+
+    def test_identical_signatures_score_a_perfect_match(self):
+        from catalog.services.matching import signature
+
+        # Stopwords ("ah", "kg") and bare digits are stripped, so these two
+        # descriptions collapse to the same signature.
+        self.assertEqual(
+            signature("AH Bananen tros", "AH", "1 kg"),
+            signature("Bananen tros", "AH", "1 kg"),
+        )
+
+    def test_fuzzy_match_respects_the_threshold(self):
+        from catalog.services.matching import match_by_name
+
+        # Only partially similar to the staged "Hazelnootpasta / Nutella" row.
+        partial = Product.objects.create(
+            supermarket=self.supermarket,
+            name="AH Hazelnootpasta pot",
+            brand="AH",
+            source_url="https://www.ah.nl/producten/product/wi555555/hazelnootpasta",
+            external_id="wi555555",
+        )
+
+        strict = match_by_name(threshold=0.999, limit=0)
+        self.assertFalse(
+            partial.identifiers.filter(id_type=ProductIdentifier.IdType.OFF_BARCODE).exists()
+        )
+        self.assertGreaterEqual(strict["below_threshold"], 1)
+
+        match_by_name(threshold=0.5)
+        self.assertTrue(
+            partial.identifiers.filter(id_type=ProductIdentifier.IdType.OFF_BARCODE).exists()
+        )
+
+    def test_fuzzy_match_is_skipped_for_already_linked_products(self):
+        from catalog.services.matching import match_by_name
+
+        match_by_name(threshold=0.6)
+        second = match_by_name(threshold=0.6)
+
+        self.assertEqual(second["considered"], 0)
+
+    def test_dry_run_writes_no_links(self):
+        from catalog.services.matching import match_by_name
+
+        match_by_name(threshold=0.6, dry_run=True)
+
+        self.assertFalse(
+            self.product.identifiers.filter(id_type=ProductIdentifier.IdType.OFF_BARCODE).exists()
+        )
+
+    def test_trusted_only_lookup_ignores_fuzzy_links(self):
+        from catalog.services.matching import match_by_name, off_record_for_product
+
+        match_by_name(threshold=0.6)
+
+        self.assertIsNotNone(off_record_for_product(self.product))
+        self.assertIsNone(off_record_for_product(self.product, trusted_only=True))
+
+
+class NutritionResolutionTests(TestCase):
+    def setUp(self):
+        from catalog.services.openfoodfacts import OpenFoodFactsIngestor
+
+        self.supermarket, _ = Supermarket.objects.get_or_create(
+            slug="albert-heijn",
+            defaults={"name": "Albert Heijn"},
+        )
+        self.off_source = DataSource.objects.get(slug="openfoodfacts")
+        self.product = Product.objects.create(
+            supermarket=self.supermarket,
+            name="AH Bananen tros",
+            brand="AH",
+            package_size="1 kg",
+            source_url="https://www.ah.nl/producten/product/wi197393/ah-bananen-tros",
+            external_id="wi197393",
+        )
+        OpenFoodFactsIngestor().ingest(
+            [
+                {
+                    "code": "8718907400114",
+                    "product_name": "Bananen tros",
+                    "brands": "AH",
+                    "quantity": "1 kg",
+                    "countries_tags": ["en:netherlands"],
+                    "nutriments": {
+                        "energy-kcal_100g": 95,
+                        "proteins_100g": 9.9,
+                        "fiber_100g": 1.9,
+                    },
+                }
+            ]
+        )
+        ProductIdentifier.objects.create(
+            product=self.product,
+            source=self.off_source,
+            id_type=ProductIdentifier.IdType.OFF_BARCODE,
+            value="8718907400114",
+            match_method=ProductIdentifier.MatchMethod.BARCODE,
+        )
+
+    def test_higher_trust_values_are_not_overwritten(self):
+        from catalog.services.nutrition_resolution import resolve_product_nutrition
+
+        NutritionFacts.objects.create(
+            product=self.product,
+            energy_kcal=Decimal("91"),
+            protein_g=Decimal("1.1"),
+        )
+
+        resolve_product_nutrition(self.product.__class__.objects.get(pk=self.product.pk))
+
+        facts = NutritionFacts.objects.get(product=self.product)
+        self.assertEqual(facts.energy_kcal, Decimal("91.00"))
+        self.assertEqual(facts.protein_g, Decimal("1.10"))
+        self.assertEqual(facts.resolved_from_source.slug, "albert-heijn")
+
+    def test_gaps_are_filled_from_the_lower_trust_source(self):
+        from catalog.services.nutrition_resolution import resolve_product_nutrition
+
+        NutritionFacts.objects.create(
+            product=self.product,
+            energy_kcal=Decimal("91"),
+            protein_g=Decimal("1.1"),
+        )
+
+        report = resolve_product_nutrition(
+            self.product.__class__.objects.get(pk=self.product.pk)
+        )
+
+        facts = NutritionFacts.objects.get(product=self.product)
+        self.assertEqual(facts.fiber_g, Decimal("1.90"))
+        self.assertIn("fiber_g", report["filled"])
+        self.assertIn("openfoodfacts", facts.resolution_note)
+
+    def test_products_with_no_ah_nutrition_are_populated_entirely_from_off(self):
+        from catalog.services.nutrition_resolution import resolve_product_nutrition
+
+        report = resolve_product_nutrition(
+            self.product.__class__.objects.get(pk=self.product.pk)
+        )
+
+        facts = NutritionFacts.objects.get(product=self.product)
+        self.assertEqual(report["action"], "created")
+        self.assertEqual(facts.protein_g, Decimal("9.90"))
+        self.assertEqual(facts.resolved_from_source.slug, "openfoodfacts")
+
+    def test_derived_diet_metrics_are_recomputed_after_resolution(self):
+        from catalog.services.nutrition_resolution import resolve_product_nutrition
+
+        NutritionFacts.objects.create(
+            product=self.product,
+            fat_g=Decimal("0.3"),
+            carbohydrates_g=Decimal("20"),
+            protein_g=Decimal("1.1"),
+        )
+
+        resolve_product_nutrition(self.product.__class__.objects.get(pk=self.product.pk))
+
+        facts = NutritionFacts.objects.get(product=self.product)
+        self.assertIsNotNone(facts.estimated_energy_kcal)
+        self.assertIsNotNone(facts.protein_score)
+
+    def test_dry_run_changes_nothing(self):
+        from catalog.services.nutrition_resolution import resolve_product_nutrition
+
+        report = resolve_product_nutrition(
+            self.product.__class__.objects.get(pk=self.product.pk), dry_run=True
+        )
+
+        self.assertEqual(report["action"], "would_create")
+        self.assertFalse(NutritionFacts.objects.filter(product=self.product).exists())
+
+    def test_trusted_matches_only_ignores_fuzzy_linked_off_data(self):
+        from catalog.services.nutrition_resolution import resolve_product_nutrition
+
+        self.product.identifiers.update(
+            match_method=ProductIdentifier.MatchMethod.FUZZY_NAME
+        )
+
+        report = resolve_product_nutrition(
+            self.product.__class__.objects.get(pk=self.product.pk),
+            trusted_matches_only=True,
+        )
+
+        self.assertEqual(report["action"], "no_data")
+
+    def test_product_with_no_sources_reports_no_data(self):
+        from catalog.services.nutrition_resolution import resolve_product_nutrition
+
+        orphan = Product.objects.create(
+            supermarket=self.supermarket,
+            name="Orphan",
+            source_url="https://www.ah.nl/producten/product/wi000001/orphan",
+            external_id="wi000001",
+        )
+
+        report = resolve_product_nutrition(orphan)
+
+        self.assertEqual(report["action"], "no_data")
+
+
+class NutritionProvenanceBackfillTests(TestCase):
+    def test_existing_rows_are_attributed_to_albert_heijn(self):
+        supermarket, _ = Supermarket.objects.get_or_create(
+            slug="albert-heijn",
+            defaults={"name": "Albert Heijn"},
+        )
+        product = Product.objects.create(
+            supermarket=supermarket,
+            name="Backfilled",
+            source_url="https://www.ah.nl/producten/product/wi000002/backfilled",
+            external_id="wi000002",
+        )
+        # A row created after the migration has no provenance until resolved,
+        # which is what distinguishes it from the backfilled historical rows.
+        facts = NutritionFacts.objects.create(product=product, energy_kcal=Decimal("50"))
+
+        self.assertIsNone(facts.resolved_from_source)
+        self.assertIsNone(facts.resolved_at)

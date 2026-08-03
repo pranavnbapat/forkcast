@@ -6,6 +6,7 @@ from .models import (
     CultureOption,
     CuisineOption,
     CrawlSource,
+    DataSource,
     Goal,
     IngredientImageAnalysis,
     ImportRun,
@@ -13,8 +14,10 @@ from .models import (
     IngredientPlanItem,
     NutritionEntry,
     NutritionFacts,
+    OpenFoodFactsProduct,
     PlannerProfile,
     Product,
+    ProductIdentifier,
     ProductQualityProfile,
     ProductSnapshot,
     RecipeSuggestionRun,
@@ -28,6 +31,13 @@ from .services.product_quality import ProductQualityEnricher, ProductQualityErro
 class NutritionFactsInline(admin.StackedInline):
     model = NutritionFacts
     extra = 0
+
+
+class ProductIdentifierInline(admin.TabularInline):
+    model = ProductIdentifier
+    extra = 0
+    fields = ("source", "id_type", "value", "is_primary", "match_method", "confidence_label")
+    autocomplete_fields = ("source",)
 
 
 class NutritionEntryInline(admin.TabularInline):
@@ -187,11 +197,29 @@ def enrich_selected_product_quality(modeladmin, request, queryset):
     )
 
 
+@admin.register(DataSource)
+class DataSourceAdmin(admin.ModelAdmin):
+    list_display = ("name", "slug", "kind", "trust_rank", "attribution_required", "is_active")
+    list_filter = ("kind", "is_active", "attribution_required")
+    search_fields = ("name", "slug")
+    prepopulated_fields = {"slug": ("name",)}
+    ordering = ("trust_rank", "name")
+
+
+@admin.register(ProductIdentifier)
+class ProductIdentifierAdmin(admin.ModelAdmin):
+    list_display = ("product", "source", "id_type", "value", "is_primary", "match_method", "confidence_label")
+    list_filter = ("source", "id_type", "match_method", "is_primary")
+    search_fields = ("value", "product__name", "product__external_id")
+    autocomplete_fields = ("product", "source")
+
+
 @admin.register(Supermarket)
 class SupermarketAdmin(admin.ModelAdmin):
-    list_display = ("name", "slug", "is_active", "updated_at")
-    list_filter = ("is_active",)
+    list_display = ("name", "slug", "data_source", "is_active", "updated_at")
+    list_filter = ("is_active", "data_source")
     search_fields = ("name", "slug")
+    autocomplete_fields = ("data_source",)
     prepopulated_fields = {"slug": ("name",)}
     actions = (seed_default_ah_sources,)
 
@@ -212,7 +240,7 @@ class ProductAdmin(admin.ModelAdmin):
     list_filter = ("supermarket", "is_active", "category_name", "nutrition_unavailable")
     search_fields = ("name", "brand", "source_url", "external_id", "category_name", "subcategory_name")
     autocomplete_fields = ("supermarket",)
-    inlines = (NutritionFactsInline, ProductSnapshotInline)
+    inlines = (NutritionFactsInline, ProductIdentifierInline, ProductSnapshotInline)
     actions = (scrape_selected_products, enrich_selected_product_quality)
 
     @admin.display(boolean=True, description="Food Candidate")
@@ -392,3 +420,22 @@ class IngredientImageAnalysisAdmin(admin.ModelAdmin):
     list_filter = ("status", "model_name")
     search_fields = ("plan__name", "profile__name", "error_text", "response_text")
     autocomplete_fields = ("plan", "profile")
+
+
+@admin.register(OpenFoodFactsProduct)
+class OpenFoodFactsProductAdmin(admin.ModelAdmin):
+    list_display = (
+        "barcode",
+        "product_name",
+        "brands",
+        "quantity",
+        "nutriscore_grade",
+        "energy_kcal",
+        "protein_g",
+        "completeness",
+        "off_last_modified_at",
+    )
+    list_filter = ("source", "nutriscore_grade", "nova_group")
+    search_fields = ("barcode", "product_name", "brands")
+    autocomplete_fields = ("source",)
+    readonly_fields = ("content_hash", "raw_payload")

@@ -78,7 +78,10 @@ This project therefore uses the API as the primary import path.
 ## Data Model
 
 Main tables:
+- `catalog_datasource`: registry of where stored data came from, with licence and trust ordering
 - `catalog_supermarket`: supermarket registry
+- `catalog_productidentifier`: per-source identifiers for a product, used for cross-source matching
+- `catalog_openfoodfactsproduct`: staged OpenFoodFacts records, keyed by barcode and not yet linked to products
 - `catalog_crawlsource`: AH bonus/catalog source registry
 - `catalog_importrun`: bookkeeping for inventory import runs
 - `catalog_product`: all products across supermarkets
@@ -93,6 +96,110 @@ Main tables:
 - `catalog_ingredientplan`: saved ingredient list and planning horizon
 - `catalog_ingredientplanitem`: saved products inside an ingredient plan
 - `catalog_recipesuggestionrun`: persisted LLM-generated recipe suggestions
+
+## Data Sources and Provenance
+
+`catalog_datasource` records where data came from, so that a second source can be added without silently overwriting the first.
+
+A source has a `kind`, because not all sources are the same shape:
+- `retailer` (Albert Heijn): authoritative for price, Bonus mechanics, and NL assortment
+- `reference_db` (OpenFoodFacts): describes products but carries no price or promotion data
+- `llm` (the vLLM endpoint): estimates, not measurements
+- `manual` / `sensor`: reserved for later
+
+`trust_rank` orders sources when two of them describe the same field; lower wins. Seeded as Albert Heijn 10, OpenFoodFacts 20, vLLM 90.
+
+`license_name`, `license_url`, `attribution_required`, and `attribution_text` exist because obligations differ per source. OpenFoodFacts data is ODbL and its attribution text must be reproduced wherever the data is redistributed.
+
+`catalog_productidentifier` holds the identifiers each source uses for a product, keyed by `id_type` (`gtin`, `ah_webshop_id`, `ah_hq_id`, `off_barcode`, `internal`). Two properties matter:
+- `match_method` distinguishes identifiers reported by an API from ones derived by fuzzy name matching, so a weak match stays visibly weak
+- `(id_type, value)` is indexed, so a barcode from another source resolves to a local product in one indexed lookup
+
+Note: the AH mobile API does not expose a GTIN/EAN in any payload captured so far, so barcode-based joining to OpenFoodFacts is not yet possible from AH data alone.
+
+Populate identifiers for products already in the database:
+
+```bash
+.venv/bin/python manage.py backfill_product_identifiers            # AH webshop ids
+.venv/bin/python manage.py backfill_product_identifiers --from-snapshots  # also hqId from snapshots
+.venv/bin/python manage.py backfill_product_identifiers --dry-run   # report only
+```
+
+The command is idempotent and safe to re-run.
+
+## OpenFoodFacts Staging
+
+`catalog_openfoodfactsproduct` holds OpenFoodFacts records keyed by barcode. It has **no foreign key to `catalog_product`**, and that is deliberate:
+
+- OFF describes millions of products that are not stocked locally
+- matching an OFF record to a local product is a separate concern, handled through `catalog_productidentifier`
+- so ingestion never blocks on matching, and re-matching later needs no re-ingestion
+
+Nutrition columns use the same names and units as `catalog_nutritionfacts` (per 100 g / 100 ml) so sources can be compared field by field later.
+
+Normalisation handled on ingest:
+- OFF nutriment keys such as `energy-kcal_100g` and `saturated-fat_100g` are mapped to our field names
+- kJ and kcal are derived from each other when only one is present
+- salt and sodium are derived from each other using the 2.5 factor
+- negative and absurdly large values are discarded rather than stored
+- records with a missing or all-zero barcode are skipped
+- corrupt JSON lines are skipped rather than aborting a multi-million-row load
+
+`content_hash` covers only the meaningful fields, so re-running an import rewrites nothing when a record has not actually changed. `off_last_modified_at` comes from OFF's `last_modified_t` and is the basis for delta ingestion.
+
+Import from a dump:
+
+```bash
+.venv/bin/python manage.py import_openfoodfacts --dump off-products.jsonl.gz --country-tag en:netherlands
+.venv/bin/python manage.py import_openfoodfacts --dump off-products.jsonl --country-tag ''   # everything
+.venv/bin/python manage.py import_openfoodfacts --dump off.jsonl --limit 5000 --store-raw
+```
+
+Use the published OFF dumps for bulk loading, not the API. OFF is a volunteer-run project that publishes dumps and daily deltas precisely so bulk consumers do not hit the API product by product; reserve the API for targeted single-barcode lookups.
+
+OFF data is ODbL licensed and its attribution text is stored on the `openfoodfacts` row in `catalog_datasource`. Reproduce it wherever the data is redistributed.
+
+## Matching and Nutrition Resolution
+
+Linking OpenFoodFacts records to local products, and then deciding which source wins, are two separate steps.
+
+### Matching
+
+```bash
+.venv/bin/python manage.py match_openfoodfacts --country-tag en:netherlands
+.venv/bin/python manage.py match_openfoodfacts --barcode-only     # deterministic join only
+.venv/bin/python manage.py match_openfoodfacts --threshold 0.9 --dry-run
+```
+
+Two paths, kept separate so their reliability stays visible:
+
+- **barcode join**: deterministic, requires a `gtin` identifier on the local product, recorded as `match_method=barcode`
+- **fuzzy name match**: compares normalised brand/name/quantity signatures, recorded as `match_method=fuzzy_name` with a confidence label and the score in `notes`
+
+Because the AH API has not been seen to expose a GTIN, the fuzzy path currently carries the load. Downstream code can require deterministic links only, via `--trusted-matches-only` on resolution or `off_record_for_product(product, trusted_only=True)`.
+
+Matching normalises away stopwords (`ah`, `bio`, `biologisch`, `vers`, unit words) and bare digits. One consequence worth knowing: `AH Biologisch Komkommer` and `AH Komkommer` both match a single OFF `Komkommer` record. Matching is many-to-one by design, since organic and standard variants are usually nutritionally equivalent, but it does mean a link is not a claim that the two are the same product.
+
+Blocking keeps the matcher tractable: OFF signatures are indexed by token, tokens appearing in more than 5% of records are dropped as non-selective, and only candidates sharing a token are scored.
+
+### Resolution
+
+```bash
+.venv/bin/python manage.py resolve_nutrition --dry-run
+.venv/bin/python manage.py resolve_nutrition --only-linked
+.venv/bin/python manage.py resolve_nutrition --trusted-matches-only
+```
+
+`catalog_nutritionfacts` remains the single canonical row the app reads, so nothing downstream needs to know multiple sources exist. Resolution is field-level and trust-ordered:
+
+- a higher-trust source is never overwritten by a lower-trust one
+- a field the higher-trust source lacks is filled from the next source that has it
+- `resolved_from_source` names the primary contributor; `resolution_note` lists every contributor and which fields were filled
+- derived diet metrics are recomputed afterwards
+
+This is what makes gap-filling worthwhile: AH commonly publishes energy and macros but omits fibre, and OFF often has it. Products where AH has no nutrition at all can be populated entirely from OFF.
+
+Rows that predate multi-source support were attributed to Albert Heijn by migration `0022`, with `resolved_at` left NULL to mark the source as asserted rather than actually resolved.
 
 Key design decision:
 - AH products are not stored in a separate physical `ah_products` table

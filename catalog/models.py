@@ -10,11 +10,54 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
+class DataSource(TimeStampedModel):
+    """Where a piece of stored data came from.
+
+    Deliberately wider than Supermarket: a retailer sells products, but a
+    reference database like OpenFoodFacts only describes them. Both are
+    sources of truth for different fields, so provenance is tracked here
+    rather than on Supermarket.
+    """
+
+    class Kind(models.TextChoices):
+        RETAILER = "retailer", "Retailer"
+        REFERENCE_DB = "reference_db", "Reference database"
+        LLM = "llm", "LLM"
+        MANUAL = "manual", "Manual"
+        SENSOR = "sensor", "Sensor"
+
+    name = models.CharField(max_length=120, unique=True)
+    slug = models.SlugField(max_length=60, unique=True)
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.RETAILER)
+    base_url = models.URLField(blank=True)
+    license_name = models.CharField(max_length=120, blank=True)
+    license_url = models.URLField(blank=True)
+    attribution_required = models.BooleanField(default=False)
+    attribution_text = models.TextField(blank=True)
+    # Lower wins when two sources describe the same field.
+    trust_rank = models.PositiveIntegerField(default=100)
+    is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["trust_rank", "name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class Supermarket(TimeStampedModel):
     name = models.CharField(max_length=120, unique=True)
     slug = models.SlugField(max_length=50, unique=True)
     homepage = models.URLField(blank=True)
     is_active = models.BooleanField(default=True)
+    data_source = models.ForeignKey(
+        DataSource,
+        on_delete=models.SET_NULL,
+        related_name="supermarkets",
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         ordering = ["name"]
@@ -126,6 +169,61 @@ class Product(TimeStampedModel):
         return f"{self.supermarket.slug}: {self.name}"
 
 
+class ProductIdentifier(TimeStampedModel):
+    """An identifier a given source uses for a product.
+
+    Cross-source matching is recorded here explicitly rather than being
+    recomputed by name every time. `match_method` keeps fuzzy matches
+    auditable and separable from identifiers that came straight from an API.
+    """
+
+    class IdType(models.TextChoices):
+        GTIN = "gtin", "GTIN / EAN barcode"
+        AH_WEBSHOP_ID = "ah_webshop_id", "AH webshop id"
+        AH_HQ_ID = "ah_hq_id", "AH HQ id"
+        OFF_BARCODE = "off_barcode", "OpenFoodFacts barcode"
+        INTERNAL = "internal", "Other internal id"
+
+    class MatchMethod(models.TextChoices):
+        API = "api", "Reported by source API"
+        BARCODE = "barcode", "Barcode join"
+        FUZZY_NAME = "fuzzy_name", "Fuzzy name match"
+        MANUAL = "manual", "Manually confirmed"
+
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="identifiers",
+    )
+    source = models.ForeignKey(
+        DataSource,
+        on_delete=models.PROTECT,
+        related_name="product_identifiers",
+    )
+    id_type = models.CharField(max_length=30, choices=IdType.choices)
+    value = models.CharField(max_length=120)
+    is_primary = models.BooleanField(default=False)
+    match_method = models.CharField(max_length=30, choices=MatchMethod.choices, default=MatchMethod.API)
+    confidence_label = models.CharField(max_length=20, blank=True)
+    notes = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["product__name", "source__trust_rank", "id_type"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "source", "id_type", "value"],
+                name="unique_identifier_per_product_source_type",
+            )
+        ]
+        indexes = [
+            # Reverse lookup: given a barcode from another source, find the product.
+            models.Index(fields=["id_type", "value"], name="idx_identifier_type_value"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.product.name} [{self.source.slug}:{self.id_type}={self.value}]"
+
+
 class NutritionFacts(TimeStampedModel):
     product = models.OneToOneField(
         Product,
@@ -158,6 +256,18 @@ class NutritionFacts(TimeStampedModel):
     unsaturated_fats_score = models.DecimalField(max_digits=8, decimal_places=5, null=True, blank=True)
     balanced_score = models.DecimalField(max_digits=8, decimal_places=5, null=True, blank=True)
     raw_text = models.TextField(blank=True)
+
+    # Provenance for the resolved row. This table stays the single canonical
+    # record the app reads; these fields say which source(s) produced it.
+    resolved_from_source = models.ForeignKey(
+        DataSource,
+        on_delete=models.SET_NULL,
+        related_name="resolved_nutrition_facts",
+        null=True,
+        blank=True,
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_note = models.CharField(max_length=255, blank=True)
 
     class Meta:
         verbose_name_plural = "nutrition facts"
@@ -261,6 +371,68 @@ class ProductQualityProfile(TimeStampedModel):
 
     def __str__(self) -> str:
         return f"{self.product.name} quality ({self.source_type}:{self.source_name})"
+
+
+class OpenFoodFactsProduct(TimeStampedModel):
+    """A staged OpenFoodFacts record, keyed by barcode.
+
+    Deliberately has no FK to Product: OFF describes millions of products that
+    are not stocked locally, and matching an OFF record to a local product is a
+    separate concern handled through ProductIdentifier. Ingestion therefore
+    never blocks on matching.
+
+    Nutrition fields use the same names and units as NutritionFacts so the
+    Phase 3 resolution layer can compare sources field by field.
+    """
+
+    barcode = models.CharField(max_length=64, unique=True)
+    source = models.ForeignKey(
+        DataSource,
+        on_delete=models.PROTECT,
+        related_name="off_products",
+    )
+    product_name = models.CharField(max_length=255, blank=True)
+    brands = models.CharField(max_length=255, blank=True)
+    quantity = models.CharField(max_length=120, blank=True)
+    serving_size = models.CharField(max_length=120, blank=True)
+    categories_tags = models.JSONField(default=list, blank=True)
+    countries_tags = models.JSONField(default=list, blank=True)
+    labels_tags = models.JSONField(default=list, blank=True)
+    ingredients_text = models.TextField(blank=True)
+    allergens_text = models.TextField(blank=True)
+    additives_tags = models.JSONField(default=list, blank=True)
+    nutriscore_grade = models.CharField(max_length=5, blank=True)
+    nova_group = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    # Per 100 g / 100 ml, matching NutritionFacts field names.
+    energy_kj = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    energy_kcal = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    fat_g = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    saturates_g = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    carbohydrates_g = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    sugars_g = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    fiber_g = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    protein_g = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    salt_g = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    sodium_g = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+
+    # OFF's own completeness score, useful when ranking against other sources.
+    completeness = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True)
+    # OFF's last_modified_t, the basis for delta ingestion.
+    off_last_modified_at = models.DateTimeField(null=True, blank=True)
+    # Hash of the meaningful fields, so unchanged records are not rewritten.
+    content_hash = models.CharField(max_length=64, blank=True)
+    raw_payload = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["barcode"]
+        indexes = [
+            models.Index(fields=["off_last_modified_at"], name="idx_off_last_modified"),
+            models.Index(fields=["content_hash"], name="idx_off_content_hash"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.barcode}: {self.product_name or '(unnamed)'}"
 
 
 class Goal(TimeStampedModel):
